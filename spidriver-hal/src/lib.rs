@@ -33,15 +33,14 @@ use spidriver::SPIDriver;
 use hal::{Comms, Parts};
 
 /// `SPIDriverHAL` is the entry point for this library.
-pub struct SPIDriverHAL<
-    UARTTX: embedded_hal::serial::Write<u8>,
-    UARTRX: embedded_hal::serial::Read<u8>,
->(core::cell::RefCell<SD<UARTTX, UARTRX>>);
+pub struct SPIDriverHAL<UARTTX: embedded_io::Write, UARTRX: embedded_io::Read>(
+    core::cell::RefCell<SD<UARTTX, UARTRX>>,
+);
 
 impl<TX, RX> SPIDriverHAL<TX, RX>
 where
-    TX: embedded_hal::serial::Write<u8>,
-    RX: embedded_hal::serial::Read<u8>,
+    TX: embedded_io::Write,
+    RX: embedded_io::Read,
 {
     /// `new` consumes an `SPIDriver` object and binds it to a HAL container.
     ///
@@ -67,17 +66,16 @@ where
     }
 }
 
-pub(crate) struct SD<
-    UARTTX: embedded_hal::serial::Write<u8>,
-    UARTRX: embedded_hal::serial::Read<u8>,
->(SPIDriver<UARTTX, UARTRX>);
+pub(crate) struct SD<UARTTX: embedded_io::Write, UARTRX: embedded_io::Read>(
+    SPIDriver<UARTTX, UARTRX>,
+);
 
-impl<TX, RX, TXErr, RXErr> Comms for SPIDriverHAL<TX, RX>
+impl<TX, RX> Comms for SPIDriverHAL<TX, RX>
 where
-    TX: embedded_hal::serial::Write<u8, Error = TXErr>,
-    RX: embedded_hal::serial::Read<u8, Error = RXErr>,
+    TX: embedded_io::Write,
+    RX: embedded_io::Read,
 {
-    type Error = spidriver::Error<TXErr, RXErr>;
+    type Error = spidriver::Error<TX::Error, RX::Error>;
 
     fn set_cs(&self, high: bool) -> Result<(), Self::Error> {
         self.with_mut_sd(|sd| {
@@ -110,13 +108,13 @@ where
         })
     }
 
-    fn transfer<'w>(&self, data: &'w mut [u8]) -> Result<&'w [u8], Self::Error> {
+    fn transfer_in_place<'w>(&self, data: &'w mut [u8]) -> Result<&'w [u8], Self::Error> {
         self.with_mut_sd(|sd| {
             let mut remain = &mut data[..];
             while remain.len() > 0 {
                 let len: usize = if remain.len() > 64 { 64 } else { remain.len() };
                 let (this, next) = remain.split_at_mut(len);
-                sd.0.transfer(this)?;
+                sd.0.transfer_in_place(this)?;
                 remain = next;
             }
             Ok(())
