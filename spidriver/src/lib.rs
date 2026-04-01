@@ -6,7 +6,7 @@
 //!
 //! The entry point is `SPIDriver::new`, which takes (and consumes) a serial
 //! writer and a serial reader as defined by
-//! [`embedded_hal::serial`](https://docs.rs/embedded-hal/0.2.3/embedded_hal/serial/).
+//! [`embedded_io`](https://docs.rs/embedded-io/0.7.1/embedded_io/).
 //! If you are running on a general computing platform then you can use
 //! [`serial_embedded_hal`](https://docs.rs/serial-embedded-hal/0.1.2/serial_embedded_hal/struct.Serial.html)
 //! to connect with a serial port provided by your operating system:
@@ -28,24 +28,22 @@
 
 #![no_std]
 
-use embedded_hal::serial;
-
 /// `SPIDriver` represents a connected SPIDriver device.
 #[derive(Debug)]
-pub struct SPIDriver<TX: serial::Write<u8>, RX: serial::Read<u8>> {
+pub struct SPIDriver<TX: embedded_io::Write, RX: embedded_io::Read> {
     ch: Channel<TX, RX>,
 }
 
-impl<TX, RX, TXErr, RXErr> SPIDriver<TX, RX>
+impl<TX, RX> SPIDriver<TX, RX>
 where
-    TX: serial::Write<u8, Error = TXErr>,
-    RX: serial::Read<u8, Error = RXErr>,
+    TX: embedded_io::Write,
+    RX: embedded_io::Read,
 {
     /// `new` consumes a serial `Write` and `Read` implementation to produce
     /// an `SPIDriver` object.
     pub fn new(tx: TX, rx: RX) -> Self {
         Self {
-            ch: Channel { tx: tx, rx: rx },
+            ch: Channel { tx, rx },
         }
     }
 
@@ -54,7 +52,7 @@ where
     /// This method can be useful for detecting whether the remote device on
     /// the serial line is actually a SPIDriver: ask it to echo back a few
     /// bytes and verify that it does.
-    pub fn echo(&mut self, ch: u8) -> Result<u8, Error<TXErr, RXErr>> {
+    pub fn echo(&mut self, ch: u8) -> Result<u8, Error<TX::Error, RX::Error>> {
         self.ch.write(b'e')?;
         self.ch.write(ch)?;
         self.ch.flush()?;
@@ -62,19 +60,19 @@ where
     }
 
     /// `select` asserts the chip select signal by driving it low.
-    pub fn select(&mut self) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn select(&mut self) -> Result<(), Error<TX::Error, RX::Error>> {
         self.ch.write(b's')?;
         self.ch.flush()
     }
 
     /// `unselect` de-asserts the chip select signal by driving it high.
-    pub fn unselect(&mut self) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn unselect(&mut self) -> Result<(), Error<TX::Error, RX::Error>> {
         self.ch.write(b'u')?;
         self.ch.flush()
     }
 
     /// `set_a` sets the active state of the auxillary "A" pin on the SPIDriver.
-    pub fn set_a(&mut self, high: bool) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn set_a(&mut self, high: bool) -> Result<(), Error<TX::Error, RX::Error>> {
         self.ch.write(b'a')?;
         if high {
             self.ch.write(b'1')?
@@ -85,7 +83,7 @@ where
     }
 
     /// `set_b` sets the active state of the auxillary "B" pin on the SPIDriver.
-    pub fn set_b(&mut self, high: bool) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn set_b(&mut self, high: bool) -> Result<(), Error<TX::Error, RX::Error>> {
         self.ch.write(b'b')?;
         if high {
             self.ch.write(b'1')?
@@ -96,7 +94,7 @@ where
     }
 
     /// `disconnect` requests that the SPIDriver disconnect from the SPI signals,
-    pub fn disconnect(&mut self) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn disconnect(&mut self) -> Result<(), Error<TX::Error, RX::Error>> {
         self.ch.write(b'x')
     }
 
@@ -104,7 +102,7 @@ where
     ///
     /// If the given slice is longer than 64 bytes then `write` will return
     /// the `Request` error.
-    pub fn write(&mut self, data: &[u8]) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn write(&mut self, data: &[u8]) -> Result<(), Error<TX::Error, RX::Error>> {
         if data.len() == 0 {
             return Ok(()); // nothing to do
         }
@@ -128,7 +126,10 @@ where
     ///
     /// If the given slice is longer than 64 bytes then `write` will return
     /// the `Request` error.
-    pub fn transfer<'v>(&mut self, data: &'v mut [u8]) -> Result<&'v [u8], Error<TXErr, RXErr>> {
+    pub fn transfer_in_place<'v>(
+        &mut self,
+        data: &'v mut [u8],
+    ) -> Result<&'v [u8], Error<TX::Error, RX::Error>> {
         if data.len() == 0 {
             return Ok(data); // nothing to do
         }
@@ -150,33 +151,40 @@ where
     //
     // This is a convenience helper to avoid constructing an array and a slice
     // from that array just to send one byte.
-    pub fn write_byte(&mut self, b: u8) -> Result<(), Error<TXErr, RXErr>> {
+    pub fn write_byte(&mut self, b: u8) -> Result<(), Error<TX::Error, RX::Error>> {
         self.ch.write(0xc0)?;
         self.ch.write(b)
     }
 }
 
 #[derive(Debug)]
-struct Channel<TX: serial::Write<u8>, RX: serial::Read<u8>> {
+struct Channel<TX: embedded_io::Write, RX: embedded_io::Read> {
     tx: TX,
     rx: RX,
 }
 
-impl<TX, RX, TXErr, RXErr> Channel<TX, RX>
+impl<TX, RX> Channel<TX, RX>
 where
-    TX: serial::Write<u8, Error = TXErr>,
-    RX: serial::Read<u8, Error = RXErr>,
+    TX: embedded_io::Write,
+    RX: embedded_io::Read,
 {
-    pub fn read(&mut self) -> Result<u8, Error<TXErr, RXErr>> {
-        nb::block!(self.rx.read()).map_err(Error::rx)
+    pub fn read(&mut self) -> Result<u8, Error<TX::Error, RX::Error>> {
+        let mut read = [0_u8];
+        // let read = nb::block!(self.rx.read(&read));
+        let _read = self.rx.read(&mut read).map_err(Error::rx)?;
+        // nb::block!().?;
+
+        Ok(read[0])
     }
 
-    pub fn write(&mut self, c: u8) -> Result<(), Error<TXErr, RXErr>> {
-        nb::block!(self.tx.write(c)).map_err(Error::tx)
+    pub fn write(&mut self, c: u8) -> Result<(), Error<TX::Error, RX::Error>> {
+        // nb::block!(self.tx.write(&[c])).map_err(Error::tx)
+        self.tx.write(&[c]).map(drop).map_err(Error::tx)
     }
 
-    pub fn flush(&mut self) -> Result<(), Error<TXErr, RXErr>> {
-        nb::block!(self.tx.flush()).map_err(Error::tx)
+    pub fn flush(&mut self) -> Result<(), Error<TX::Error, RX::Error>> {
+        // nb::block!(self.tx.flush()).map_err(Error::tx)
+        self.tx.flush().map(drop).map_err(Error::tx)
     }
 }
 

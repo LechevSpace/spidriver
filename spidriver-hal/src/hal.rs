@@ -1,5 +1,7 @@
-use embedded_hal::blocking::spi;
-use embedded_hal::digital::v2 as gpiov2;
+use embedded_hal::{
+    digital,
+    spi::{self, Operation},
+};
 
 pub trait Comms {
     type Error;
@@ -8,7 +10,7 @@ pub trait Comms {
     fn set_a(&self, active: bool) -> Result<(), Self::Error>;
     fn set_b(&self, active: bool) -> Result<(), Self::Error>;
     fn write(&self, data: &[u8]) -> Result<(), Self::Error>;
-    fn transfer<'w>(&self, data: &'w mut [u8]) -> Result<&'w [u8], Self::Error>;
+    fn transfer_in_place<'w>(&self, data: &'w mut [u8]) -> Result<&'w [u8], Self::Error>;
 }
 
 /// `Parts` is a container for the various parts of a SPIDriver that can be
@@ -47,7 +49,7 @@ impl<'a, SD: 'a> Parts<'a, SD>
 where
     SD: Comms,
 {
-    pub(crate) fn new(sd: &'a SD) -> Self {
+    pub fn new(sd: &'a SD) -> Self {
         Self {
             spi: SPI::new(&sd),
             cs: CS::new(&sd),
@@ -70,11 +72,23 @@ where
     }
 }
 
-impl<'a, SD: 'a, E> spi::Transfer<u8> for SPI<'a, SD>
+impl<'a, SD: 'a, E> spi::ErrorType for SPI<'a, SD>
 where
+    // SD: Comms<Error = spidriver::Error<TXErr, RXErr>>,
     SD: Comms<Error = E>,
+    E: spi::Error,
 {
     type Error = E;
+}
+
+// impl<'a, SD: 'a, E: spi::Error> spi::SpiDevice for SPI<'a, SD>
+impl<'a, SD: 'a, E> spi::SpiDevice for SPI<'a, SD>
+where
+    // SD: Comms<Error = spidriver::Error<TXErr, RXErr>>,
+    SD: Comms<Error = E>,
+    E: spi::Error, // SpiError: From<E>, // SD: Comms<Error = E>,
+{
+    // type Error = E;
 
     /// Implements blocking SPI `Transfer` by passing the given data to the
     /// SPIDriver in chunks of up to 64 bytes each.
@@ -82,27 +96,81 @@ where
     /// Because of the chunking behavior, larger messages may have inconsistent
     /// timing at the chunk boundaries, which may affect devices with particularly
     /// sensitive clock timing constraints.
-    fn transfer<'w>(&mut self, data: &'w mut [u8]) -> Result<&'w [u8], E> {
-        self.0.transfer(data)
+    fn transaction(
+        &mut self,
+        operations: &mut [spi::Operation<'_, u8>],
+    ) -> Result<(), Self::Error> {
+        for op in operations {
+            match op {
+                Operation::TransferInPlace(words) => {
+                    // self.0.transfer_in_place(words).map_err(|_e| SpiError).map(drop)?
+                    self.0.transfer_in_place(words).map(drop)?
+                }
+                // _ => return Err(spidriver::Error::<_, _>::Request),
+                _ => {
+                    // do nothing for now
+                    panic!("Not supposed to happen")
+                }
+            }
+        }
+        Ok(())
     }
+    // <'w>(&mut self, data: &'w mut [u8]) -> Result<&'w [u8], E> {
+    //     self.0.transfer(data)
+    // }
 }
 
-impl<'a, SD: 'a, E> spi::Write<u8> for SPI<'a, SD>
+impl<'a, SD: 'a, E> spi::SpiBus for SPI<'a, SD>
 where
     SD: Comms<Error = E>,
+    E: spi::Error,
 {
-    type Error = E;
+    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        // Send dummy bytes while reading
+        words.fill(0);
+        self.0.transfer_in_place(words).map(|_| ())
+    }
 
-    /// Implements blocking SPI `Write` by passing the given data to the
-    /// SPIDriver in chunks of up to 64 bytes each.
-    ///
-    /// Because of the chunking behavior, larger messages may have inconsistent
-    /// timing at the chunk boundaries, which may affect devices with particularly
-    /// sensitive clock timing constraints.
-    fn write(&mut self, data: &[u8]) -> Result<(), E> {
-        self.0.write(data)
+    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        self.0.write(words)
+    }
+
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        // SPI requires equal-length buffers
+        let len = read.len().min(write.len());
+
+        // Copy write data into read buffer so we can perform in-place transfer
+        read[..len].copy_from_slice(&write[..len]);
+
+        self.0.transfer_in_place(&mut read[..len]).map(|_| ())
+    }
+
+    fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.transfer_in_place(words).map(|_| ())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        // Backend appears synchronous, so nothing to flush
+        Ok(())
     }
 }
+
+// impl<'a, SD: 'a, E> spi::Write<u8> for SPI<'a, SD>
+// where
+//     SD: Comms<Error = E>,
+// {
+//     type Error = E;
+
+//     /// Implements blocking SPI `Write` by passing the given data to the
+//     /// SPIDriver in chunks of up to 64 bytes each.
+//     ///
+//     /// Because of the chunking behavior, larger messages may have inconsistent
+//     /// timing at the chunk boundaries, which may affect devices with particularly
+//     /// sensitive clock timing constraints.
+//     fn write(&mut self, data: &[u8]) -> Result<(), E> {
+//         self.0.write(data)
+//     }
+// }
 
 /// `CS` implements some of the digital IO traits from `embedded-hal` in
 /// terms of an SPIDriver device's Chip Select pin.
@@ -117,23 +185,49 @@ where
     }
 }
 
-impl<'a, SD: 'a, E> gpiov2::OutputPin for CS<'a, SD>
+impl<'a, SD: 'a, E> digital::ErrorType for CS<'a, SD>
+// where
+// <SD as Comms>::Error: digital::Error,
 where
     SD: Comms<Error = E>,
+    E: digital::Error,
 {
+    // type Error = SD::Error;
     type Error = E;
+}
 
-    fn set_low(&mut self) -> Result<(), E> {
+impl<'a, SD: 'a, E> digital::OutputPin for CS<'a, SD>
+where
+    SD: Comms<Error = E>,
+    E: digital::Error,
+    // SD: Comms<Error = Self::Error>,
+{
+    fn set_low(&mut self) -> Result<(), Self::Error> {
         self.0.set_cs(false)
     }
 
-    fn set_high(&mut self) -> Result<(), E> {
+    fn set_high(&mut self) -> Result<(), Self::Error> {
         self.0.set_cs(true)
     }
 }
 
+// #[derive(Debug)]
+// pub struct PinError;
+// impl digital::Error for PinError {
+//     fn kind(&self) -> digital::ErrorKind {
+//         digital::ErrorKind::Other
+//     }
+// }
+
+// impl<TXErr, RXErr> From<Error<TXErr, RXErr>> for SpiError {
+//     fn from(value: Error<TXErr, RXErr>) -> Self {
+//         SpiError
+//     }
+// }
+
 /// `PinA` implements some of the digital IO traits from `embedded-hal` in
 /// terms of an SPIDriver device's auxillary output pin A.
+/// w#[derive(Debug)]
 pub struct PinA<'a, SD: Comms>(&'a SD);
 
 impl<'a, SD: 'a> PinA<'a, SD>
@@ -145,23 +239,35 @@ where
     }
 }
 
-impl<'a, SD: 'a, E> gpiov2::OutputPin for PinA<'a, SD>
+impl<'a, SD: 'a, E> digital::ErrorType for PinA<'a, SD>
 where
     SD: Comms<Error = E>,
+    E: digital::Error,
+    // where
+    // <SD as Comms>::Error: digital::Error,
 {
+    // type Error = SD::Error;
     type Error = E;
+}
 
-    fn set_low(&mut self) -> Result<(), E> {
+impl<'a, SD: 'a, E> digital::OutputPin for PinA<'a, SD>
+where
+    SD: Comms<Error = E>,
+    E: digital::Error,
+    // SD: Comms<Error = SD::Error>,
+{
+    fn set_low(&mut self) -> Result<(), Self::Error> {
         self.0.set_a(false)
     }
 
-    fn set_high(&mut self) -> Result<(), E> {
+    fn set_high(&mut self) -> Result<(), Self::Error> {
         self.0.set_a(true)
     }
 }
 
 /// `PinB` implements some of the digital IO traits from `embedded-hal` in
 /// terms of an SPIDriver device's auxillary output pin B.
+#[derive(Debug)]
 pub struct PinB<'a, SD: Comms>(&'a SD);
 
 impl<'a, SD: 'a> PinB<'a, SD>
@@ -173,17 +279,26 @@ where
     }
 }
 
-impl<'a, SD: 'a, E> gpiov2::OutputPin for PinB<'a, SD>
+impl<'a, SD: 'a, E> digital::ErrorType for PinB<'a, SD>
 where
+    // <SD as Comms>::Error: digital::Error,
     SD: Comms<Error = E>,
+    E: digital::Error,
 {
     type Error = E;
+    // type Error = SD::Error;
+}
 
-    fn set_low(&mut self) -> Result<(), E> {
+impl<'a, SD: 'a, E> digital::OutputPin for PinB<'a, SD>
+where
+    SD: Comms<Error = E>,
+    E: digital::Error,
+{
+    fn set_low(&mut self) -> Result<(), Self::Error> {
         self.0.set_b(false)
     }
 
-    fn set_high(&mut self) -> Result<(), E> {
+    fn set_high(&mut self) -> Result<(), Self::Error> {
         self.0.set_b(true)
     }
 }
