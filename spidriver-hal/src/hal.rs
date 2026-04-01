@@ -49,7 +49,7 @@ impl<'a, SD: 'a> Parts<'a, SD>
 where
     SD: Comms,
 {
-    pub(crate) fn new(sd: &'a SD) -> Self {
+    pub fn new(sd: &'a SD) -> Self {
         Self {
             spi: SPI::new(&sd),
             cs: CS::new(&sd),
@@ -118,6 +118,41 @@ where
     // <'w>(&mut self, data: &'w mut [u8]) -> Result<&'w [u8], E> {
     //     self.0.transfer(data)
     // }
+}
+
+impl<'a, SD: 'a, E> spi::SpiBus for SPI<'a, SD>
+where
+    SD: Comms<Error = E>,
+    E: spi::Error,
+{
+    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        // Send dummy bytes while reading
+        words.fill(0);
+        self.0.transfer_in_place(words).map(|_| ())
+    }
+
+    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        self.0.write(words)
+    }
+
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        // SPI requires equal-length buffers
+        let len = read.len().min(write.len());
+
+        // Copy write data into read buffer so we can perform in-place transfer
+        read[..len].copy_from_slice(&write[..len]);
+
+        self.0.transfer_in_place(&mut read[..len]).map(|_| ())
+    }
+
+    fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.transfer_in_place(words).map(|_| ())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        // Backend appears synchronous, so nothing to flush
+        Ok(())
+    }
 }
 
 // impl<'a, SD: 'a, E> spi::Write<u8> for SPI<'a, SD>
